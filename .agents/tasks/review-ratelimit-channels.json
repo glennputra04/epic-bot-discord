@@ -1,0 +1,20 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "label": "User token spent on channel-capped guesses",
+      "severity": "minor",
+      "blocking": false,
+      "confidence": "confirmed",
+      "detail": "allow_guess charges the per-user bucket before checking the per-channel bucket, so a guess blocked by the channel cap still costs the player a token. Check the channel bucket first or refund/peek the user bucket if it matters in practice."
+    },
+    {
+      "label": "Silent channel cap in group hangman",
+      "severity": "minor",
+      "blocking": false,
+      "confidence": "confirmed",
+      "detail": "At 5 acted-on guesses per 5 s per channel, letters from an active group hangman game are dropped with no feedback. Deliberate per plan decision 12; consider a one-time reaction per window or a looser RATELIMIT_CHANNEL default."
+    }
+  ],
+  "reviewDoc": "c:\\Users\\Hp\\OneDrive\\Dokumen\\VerdantBot\\epic-bot-discord\\.agents\\tasks\\review-ratelimit-channels.md"
+}
