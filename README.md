@@ -23,18 +23,18 @@ If you **reply** to the crossword or word search post, the bot only checks again
 
 ## Daily AREDL Hangman
 
-One level from the [AREDL list](https://api.aredl.net/v2/docs) per UTC day. A new level starts at 00:00 UTC (from the server's system clock, not `TIMEZONE`) and is posted to the AREDL daily channel (`/set-daily-aredl`). Everyone gets the same level; each server has its own board.
+One level from the [AREDL list](https://api.aredl.net/v2/docs) every 12 hours. A new level starts at 00:00 and 12:00 UTC (from the server's system clock, not `TIMEZONE`) and is posted to the AREDL daily channel (`/set-daily-aredl`). Everyone gets the same level; each server has its own board.
 
 ```
 _ _ _ _ _ _ _  /  _ _
 ```
 
-- Type a **single letter or digit** in a channel where today's board was posted, **reply** to the board with the full level name, or use `/hangman guess`. Case, spaces and punctuation don't matter. In chat, repeated guesses and guesses from players who are out are ignored quietly.
-- Every player has **3 lives** a day. A wrong letter or wrong name costs only you a life; at 0 you're out until tomorrow, but everyone else can keep playing. Repeating a guess costs nothing.
+- Type a **single letter or digit** in a channel where the current board was posted, **reply** to the board with the full level name, or use `/hangman guess`. Case, spaces and punctuation don't matter. In chat, repeated guesses and guesses from players who are out are ignored quietly.
+- Every player has **3 lives** per round. A wrong letter or wrong name costs only you a life; at 0 you're out until the next round, but everyone else can keep playing. Repeating a guess costs nothing.
 - The hint is the level's description with the level name blanked out. Levels without one show "No description available." and their tags. While playing, the position is shown as a band (`Top 100`, `#101–250`, `#251–500`, `#501–1000`, `#1001+` or `Legacy`); the exact position appears once the puzzle is solved.
 - When someone completes the name, the bot also posts the level's verification video (from the AREDL level details), if AREDL has one.
-- The puzzle stays open until someone completes the name. A solved puzzle stays solved until the next UTC day, and the next day's post in the AREDL daily channel reveals yesterday's level either way.
-- `/hangman giveup` is personal: it shows you the answer (only you see it) and puts you out for the day. It doesn't end the puzzle for anyone else.
+- The puzzle stays open until someone completes the name. A solved puzzle stays solved until the next round, and the next round's post in the AREDL daily channel reveals the previous level either way.
+- `/hangman giveup` is personal: it shows you the answer (only you see it) and puts you out for the round. It doesn't end the puzzle for anyone else.
 
 ## Commands
 
@@ -46,9 +46,9 @@ _ _ _ _ _ _ _  /  _ _
 | `/progress` | Your solved clues and found words (only you see it) |
 | `/yesterday` | Yesterday's crossword and word search solutions |
 | `/leaderboard` | Top 10 solvers |
-| `/hangman start` | Show today's AREDL hangman board |
+| `/hangman start` | Show the current AREDL hangman board |
 | `/hangman guess` | Guess a letter/digit or the full level name |
-| `/hangman giveup` | See the answer (only you see it); you're out for today |
+| `/hangman giveup` | See the answer (only you see it); you're out for this round |
 | `/set-daily-qotd [channel]` | *(Manage Server)* Post the Question of the Day in a channel (default: this one) |
 | `/set-daily-crossword [channel]` | *(Manage Server)* Post the daily crossword in a channel (default: this one) |
 | `/set-daily-wordsearch [channel]` | *(Manage Server)* Post the daily word search in a channel (default: this one) |
@@ -62,7 +62,7 @@ _ _ _ _ _ _ _  /  _ _
 
 Each daily post goes only to its own channel, so you can split them up per server:
 
-- Question of the Day, crossword and word search are posted at `POST_TIME` (`TIMEZONE`); the hangman at 00:00 UTC.
+- Question of the Day, crossword and word search are posted at `POST_TIME` (`TIMEZONE`); the hangman at 00:00 and 12:00 UTC.
 - `DAILY_CHANNEL_ID` in `.env` is the default for any feature a server hasn't set or turned off.
 - `/unset-daily` turns a feature off for that server, including the `DAILY_CHANNEL_ID` default.
 - Servers set up with the old `/setchannel` keep getting every feature in that channel after upgrading.
@@ -117,7 +117,7 @@ Add words to `words.json` (`{"word": "...", "clue": "..."}`, 3–10 letters). To
 ```bash
 python crossword.py
 python wordsearch.py
-python hangman.py      # today's hangman level (fetches the AREDL list)
+python hangman.py      # the current hangman level (fetches the AREDL list)
 ```
 
 ## Files

@@ -101,8 +101,8 @@ async def puzzel_links(day: str) -> dict[str, str]:
 
 
 async def hangman_ready() -> bool:
-    """Make sure today's (UTC) hangman level is chosen. Only downloads when the day changes."""
-    day = hangman.utc_today()
+    """Make sure this round's (12 h, UTC) hangman level is chosen. Only downloads when the round changes."""
+    day = hangman.current_round()
     if hangman.current(storage.data["hangman"], day):
         return True
     async with hangman_lock:
@@ -190,7 +190,7 @@ def hangman_embed(g: hangman.Game, note: str | None = None) -> discord.Embed:
               hangman.LOST: discord.Color.red()}
     board = f"```\n{g.board()}\n```"
     embed = discord.Embed(
-        title=f"🎯 Daily AREDL Hangman — {storage.data['hangman']['day']} (UTC)",
+        title=f"🎯 AREDL Hangman — {hangman.round_label(storage.data['hangman']['day'])} (UTC)",
         description=f"{note}\n\n{board}" if note else board,
         color=colors.get(g.state["status"], discord.Color.orange()),
     )
@@ -222,7 +222,7 @@ def hangman_embed(g: hangman.Game, note: str | None = None) -> discord.Embed:
                    f"or use `/hangman guess`. Everyone gets {hangman.LIVES} ❤️ and wrong guesses only cost you."),
             inline=False,
         )
-    embed.set_footer(text="Levels via aredl.net • new level every day at 00:00 UTC")
+    embed.set_footer(text="Levels via aredl.net • new level every 12 hours (00:00 and 12:00 UTC)")
     return embed
 
 
@@ -243,9 +243,9 @@ def hangman_note(user: discord.abc.User, r: hangman.GuessResult, g: hangman.Game
     if r.outcome == hangman.REPEAT:
         return f"**{guess}** was already guessed, no life lost. You have {lives}.", False
     if r.outcome == hangman.OUT:
-        return f"You're out of lives for today's puzzle. {later}", False
+        return f"You're out of lives for this puzzle. {later}", False
     if r.outcome == hangman.FINISHED:
-        return f"Today's puzzle is finished. {later}", False
+        return f"This puzzle is finished. {later}", False
     return "Guess a single letter/digit or the full level name.", False
 
 
@@ -414,8 +414,8 @@ async def handle_hangman(message: discord.Message) -> bool:
     """Treat a single letter in a channel with today's board, or a reply to the board,
     as a hangman guess. Returns True when the message was a guess."""
     data = storage.data["hangman"]
-    if not hangman.current(data, hangman.utc_today()):
-        return False  # plain messages never hit the API; /hangman start loads the day
+    if not hangman.current(data, hangman.current_round()):
+        return False  # plain messages never hit the API; /hangman start loads the round
     state = data["guilds"].get(str(message.guild.id))  # type: ignore[union-attr]
     if state is None or state.get("status", hangman.PLAYING) != hangman.PLAYING:
         return False
@@ -532,18 +532,18 @@ async def _wait_ready() -> None:
     await client.wait_until_ready()
 
 
-# The hangman day is UTC from the system clock (not TIMEZONE). Posting 30 s after
-# midnight makes sure the date has already rolled over when the loop wakes up.
-@tasks.loop(time=dt.time(hour=0, minute=0, second=30, tzinfo=dt.timezone.utc))
+# Hangman rounds are 12 h in UTC from the system clock (not TIMEZONE). Posting 30 s after
+# each boundary makes sure the round has already rolled over when the loop wakes up.
+@tasks.loop(time=[dt.time(hour=h, minute=0, second=30, tzinfo=dt.timezone.utc)
+                  for h in range(0, 24, hangman.ROUND_HOURS)])
 async def hangman_daily() -> None:
     if not await hangman_ready():
         return
     data = storage.data["hangman"]
     prev = data.get("previous")
-    note = "New day, new level!"
-    yesterday_utc = (hangman.utc_now().date() - dt.timedelta(days=1)).isoformat()
-    if prev and prev.get("day") == yesterday_utc:
-        note += f" Yesterday's was **{discord.utils.escape_markdown(prev['name'])}** (#{prev['position']})."
+    note = "New round, new level!"
+    if prev and prev.get("day") == hangman.previous_round():
+        note += f" The last one was **{discord.utils.escape_markdown(prev['name'])}** (#{prev['position']})."
     for channel_id in daily_channel_ids("aredl"):
         channel = await resolve_channel(channel_id)
         if channel is None:
@@ -649,7 +649,7 @@ DAILY_LABELS = {
 def post_time(feature: str) -> str:
     if feature in POST_FEATURES:
         return f"{POST_HOUR:02d}:{POST_MINUTE:02d} {TZ.key}"
-    return "00:00 UTC"
+    return "00:00 and 12:00 UTC"
 
 
 def missing_perms(channel: discord.TextChannel | discord.Thread, me: discord.Member,
@@ -767,12 +767,12 @@ async def postnow_cmd(interaction: discord.Interaction) -> None:
 
 
 hangman_group = app_commands.Group(
-    name="hangman", description="Daily AREDL hangman: guess today's Extreme Demon", guild_only=True
+    name="hangman", description="AREDL hangman: guess the Extreme Demon (new level every 12 hours)", guild_only=True
 )
-NOT_LOADED = "Today's puzzle isn't loaded yet. Run `/hangman start` first."
+NOT_LOADED = "This round's puzzle isn't loaded yet. Run `/hangman start` first."
 
 
-@hangman_group.command(name="start", description="Show today's AREDL hangman puzzle")
+@hangman_group.command(name="start", description="Show the current AREDL hangman puzzle")
 async def hangman_start_cmd(interaction: discord.Interaction) -> None:
     await interaction.response.defer()  # the level list is ~1 MB, which can take over 3 s
     if not await hangman_ready():
@@ -781,7 +781,7 @@ async def hangman_start_cmd(interaction: discord.Interaction) -> None:
     g = hangman.game_for(storage.data["hangman"], interaction.guild_id)  # type: ignore[arg-type]
     note = None
     if g.finished:
-        note = ("Today's puzzle is finished. The next one starts "
+        note = ("This puzzle is finished. The next one starts "
                 f"{discord.utils.format_dt(hangman.next_reset(), 'R')}.")
     msg = await interaction.followup.send(embed=hangman_embed(g, note), wait=True)
     await remember_hangman(g, msg)
@@ -791,7 +791,7 @@ async def hangman_start_cmd(interaction: discord.Interaction) -> None:
 @app_commands.describe(guess="A single letter/digit, or the full level name")
 async def hangman_guess_cmd(interaction: discord.Interaction, guess: str) -> None:
     data = storage.data["hangman"]
-    if not hangman.current(data, hangman.utc_today()):
+    if not hangman.current(data, hangman.current_round()):
         await interaction.response.send_message(NOT_LOADED, ephemeral=True)
         return
     g = hangman.game_for(data, interaction.guild_id)  # type: ignore[arg-type]
@@ -808,10 +808,10 @@ async def hangman_guess_cmd(interaction: discord.Interaction, guess: str) -> Non
         await interaction.followup.send(video)
 
 
-@hangman_group.command(name="giveup", description="Give up today's puzzle and see the answer (only you see it)")
+@hangman_group.command(name="giveup", description="Give up this puzzle and see the answer (only you see it)")
 async def hangman_giveup_cmd(interaction: discord.Interaction) -> None:
     data = storage.data["hangman"]
-    if not hangman.current(data, hangman.utc_today()):
+    if not hangman.current(data, hangman.current_round()):
         await interaction.response.send_message(NOT_LOADED, ephemeral=True)
         return
     g = hangman.game_for(data, interaction.guild_id)  # type: ignore[arg-type]
@@ -820,10 +820,10 @@ async def hangman_giveup_cmd(interaction: discord.Interaction) -> None:
         gave_up = g.give_up(interaction.user.id)
         storage.save()
     if not gave_up:
-        await interaction.response.send_message(f"Today's puzzle is finished. {later}", ephemeral=True)
+        await interaction.response.send_message(f"This puzzle is finished. {later}", ephemeral=True)
         return
     await interaction.response.send_message(
-        f"The level was **{discord.utils.escape_markdown(g.name)}** (#{g.position}). You're out for today. {later}",
+        f"The level was **{discord.utils.escape_markdown(g.name)}** (#{g.position}). You're out for this round. {later}",
         ephemeral=True,
     )
 
