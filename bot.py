@@ -32,9 +32,10 @@ TZ = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
 POST_HOUR, POST_MINUTE = (int(x) for x in os.getenv("POST_TIME", "09:00").split(":"))
 QOTD_CATEGORY = os.getenv("QOTD_CATEGORY", "general")
 DATA_FILE = os.getenv("DATA_FILE", "data/state.json")
+LEADERBOARD_FILE = os.getenv("LEADERBOARD_FILE") or None  # default: leaderboard.json next to DATA_FILE
 
 CORRECT, WRONG = "✅", "❌"
-storage = Storage(DATA_FILE)
+storage = Storage(DATA_FILE, LEADERBOARD_FILE)
 puzzel_lock = asyncio.Lock()
 puzzel_attempted: set[tuple[str, str]] = set()  # (day, kind) already tried since startup
 

@@ -79,5 +79,11 @@ answers.py     Parses messages like "1. apple" / "3 down banana"
 crossword.py   Crossword generator and text renderer
 wordsearch.py  Word search generator and text renderer
 words.json     Word/clue bank
-storage.py     JSON file storage (data/state.json)
+storage.py     JSON file storage (data/state.json + data/leaderboard.json)
 ```
+
+The leaderboard lives in its own file, `data/leaderboard.json` (override with
+`LEADERBOARD_FILE`), so you can back it up or restore it on its own. Copying
+that file in place while the bot is stopped restores everyone's scores. On
+first start after upgrading, existing scores are moved out of `state.json`
+automatically.
