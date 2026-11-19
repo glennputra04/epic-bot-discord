@@ -1,4 +1,4 @@
-"""Daily Discord bot: Question of the Day + Daily Crossword + Daily Word Search + Daily AREDL Hangman."""
+"""Daily Discord bot: Question of the Day + Daily Crossword + Daily Word Search + AREDL Hangman + AREDL RNG."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()  # before importing puzzel, which reads its settings from the environment
 
 import answers  # noqa: E402
+import aredl_rng  # noqa: E402
 import game  # noqa: E402
 import hangman  # noqa: E402
 import puzzel  # noqa: E402
@@ -35,6 +36,8 @@ TZ = ZoneInfo(os.getenv("TIMEZONE", "UTC"))
 POST_HOUR, POST_MINUTE = (int(x) for x in os.getenv("POST_TIME", "09:00").split(":"))
 QOTD_CATEGORY = os.getenv("QOTD_CATEGORY", "general")
 DATA_FILE = os.getenv("DATA_FILE", "data/state.json")
+LEADERBOARD_FILE = os.getenv("LEADERBOARD_FILE") or None  # default: leaderboard.json next to DATA_FILE
+INVENTORY_FILE = os.getenv("INVENTORY_FILE") or None  # default: inventory.json next to DATA_FILE
 
 # Rate limits as "count/seconds" (see ratelimit.py for the defaults).
 command_limiter = ratelimit.RateLimiter(*ratelimit.parse_rate(os.getenv("RATELIMIT_COMMANDS"), ratelimit.COMMANDS))
@@ -42,7 +45,7 @@ guess_limiter = ratelimit.RateLimiter(*ratelimit.parse_rate(os.getenv("RATELIMIT
 channel_limiter = ratelimit.RateLimiter(*ratelimit.parse_rate(os.getenv("RATELIMIT_CHANNEL"), ratelimit.CHANNEL))
 
 CORRECT, WRONG = "✅", "❌"
-storage = Storage(DATA_FILE)
+storage = Storage(DATA_FILE, LEADERBOARD_FILE, INVENTORY_FILE)
 puzzel_lock = asyncio.Lock()
 hangman_lock = asyncio.Lock()
 puzzel_attempted: set[tuple[str, str]] = set()  # (day, kind) already tried since startup
@@ -100,8 +103,8 @@ async def puzzel_links(day: str) -> dict[str, str]:
 
 
 async def hangman_ready() -> bool:
-    """Make sure today's (UTC) hangman level is chosen. Only downloads when the day changes."""
-    day = hangman.utc_today()
+    """Make sure this round's (12 h, UTC) hangman level is chosen. Only downloads when the round changes."""
+    day = hangman.current_round()
     if hangman.current(storage.data["hangman"], day):
         return True
     async with hangman_lock:
@@ -189,7 +192,7 @@ def hangman_embed(g: hangman.Game, note: str | None = None) -> discord.Embed:
               hangman.LOST: discord.Color.red()}
     board = f"```\n{g.board()}\n```"
     embed = discord.Embed(
-        title=f"🎯 Daily AREDL Hangman — {storage.data['hangman']['day']} (UTC)",
+        title=f"🎯 AREDL Hangman — {hangman.round_label(storage.data['hangman']['day'])} (UTC)",
         description=f"{note}\n\n{board}" if note else board,
         color=colors.get(g.state["status"], discord.Color.orange()),
     )
@@ -221,7 +224,7 @@ def hangman_embed(g: hangman.Game, note: str | None = None) -> discord.Embed:
                    f"or use `/hangman guess`. Everyone gets {hangman.LIVES} ❤️ and wrong guesses only cost you."),
             inline=False,
         )
-    embed.set_footer(text="Levels via aredl.net • new level every day at 00:00 UTC")
+    embed.set_footer(text="Levels via aredl.net • new level every 12 hours (00:00 and 12:00 UTC)")
     return embed
 
 
@@ -242,9 +245,9 @@ def hangman_note(user: discord.abc.User, r: hangman.GuessResult, g: hangman.Game
     if r.outcome == hangman.REPEAT:
         return f"**{guess}** was already guessed, no life lost. You have {lives}.", False
     if r.outcome == hangman.OUT:
-        return f"You're out of lives for today's puzzle. {later}", False
+        return f"You're out of lives for this puzzle. {later}", False
     if r.outcome == hangman.FINISHED:
-        return f"Today's puzzle is finished. {later}", False
+        return f"This puzzle is finished. {later}", False
     return "Guess a single letter/digit or the full level name.", False
 
 
@@ -292,6 +295,7 @@ class DailyBot(discord.Client):
             await self.tree.sync()
         daily_post.start()
         hangman_daily.start()
+        rng_hourly.start()
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s; daily post at %02d:%02d %s; Puzzel %s",
@@ -302,6 +306,8 @@ class DailyBot(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
+            return
+        if await handle_collect(message):
             return
         if await handle_hangman(message):
             return
@@ -394,12 +400,27 @@ async def send_hangman(channel: discord.abc.Messageable, guild_id: int, note: st
     return msg
 
 
+async def hangman_video_text(g: hangman.Game) -> str | None:
+    """The 'here's the level' follow-up for a solved board, or None if AREDL has no video.
+    A found URL is saved with today's level so other servers' wins don't ask the API again."""
+    url = g.level.get("video")
+    if not url:
+        url = await hangman.fetch_video(g.level["id"])
+        if not url:
+            return None
+        async with storage.lock:
+            g.level["video"] = url
+            storage.save()
+    # Sent as plain text so Discord shows its video player (embeds can't play videos).
+    return f"🎬 **{discord.utils.escape_markdown(g.name)}** verification: {url}"
+
+
 async def handle_hangman(message: discord.Message) -> bool:
     """Treat a single letter in a channel with today's board, or a reply to the board,
     as a hangman guess. Returns True when the message was a guess."""
     data = storage.data["hangman"]
-    if not hangman.current(data, hangman.utc_today()):
-        return False  # plain messages never hit the API; /hangman start loads the day
+    if not hangman.current(data, hangman.current_round()):
+        return False  # plain messages never hit the API; /hangman start loads the round
     state = data["guilds"].get(str(message.guild.id))  # type: ignore[union-attr]
     if state is None or state.get("status", hangman.PLAYING) != hangman.PLAYING:
         return False
@@ -421,6 +442,8 @@ async def handle_hangman(message: discord.Message) -> bool:
     try:
         reply = await message.reply(embed=hangman_embed(g, text), mention_author=False)
         await remember_hangman(g, reply)
+        if r.outcome == hangman.WIN and (video := await hangman_video_text(g)):
+            await message.channel.send(video)
     except discord.HTTPException as exc:
         log.warning("Couldn't reply to a hangman guess in #%s: %s", message.channel, exc)
     return True
@@ -514,18 +537,18 @@ async def _wait_ready() -> None:
     await client.wait_until_ready()
 
 
-# The hangman day is UTC from the system clock (not TIMEZONE). Posting 30 s after
-# midnight makes sure the date has already rolled over when the loop wakes up.
-@tasks.loop(time=dt.time(hour=0, minute=0, second=30, tzinfo=dt.timezone.utc))
+# Hangman rounds are 12 h in UTC from the system clock (not TIMEZONE). Posting 30 s after
+# each boundary makes sure the round has already rolled over when the loop wakes up.
+@tasks.loop(time=[dt.time(hour=h, minute=0, second=30, tzinfo=dt.timezone.utc)
+                  for h in range(0, 24, hangman.ROUND_HOURS)])
 async def hangman_daily() -> None:
     if not await hangman_ready():
         return
     data = storage.data["hangman"]
     prev = data.get("previous")
-    note = "New day, new level!"
-    yesterday_utc = (hangman.utc_now().date() - dt.timedelta(days=1)).isoformat()
-    if prev and prev.get("day") == yesterday_utc:
-        note += f" Yesterday's was **{discord.utils.escape_markdown(prev['name'])}** (#{prev['position']})."
+    note = "New round, new level!"
+    if prev and prev.get("day") == hangman.previous_round():
+        note += f" The last one was **{discord.utils.escape_markdown(prev['name'])}** (#{prev['position']})."
     for channel_id in daily_channel_ids("aredl"):
         channel = await resolve_channel(channel_id)
         if channel is None:
@@ -631,7 +654,7 @@ DAILY_LABELS = {
 def post_time(feature: str) -> str:
     if feature in POST_FEATURES:
         return f"{POST_HOUR:02d}:{POST_MINUTE:02d} {TZ.key}"
-    return "00:00 UTC"
+    return "00:00 and 12:00 UTC"
 
 
 def missing_perms(channel: discord.TextChannel | discord.Thread, me: discord.Member,
@@ -749,12 +772,12 @@ async def postnow_cmd(interaction: discord.Interaction) -> None:
 
 
 hangman_group = app_commands.Group(
-    name="hangman", description="Daily AREDL hangman: guess today's Extreme Demon", guild_only=True
+    name="hangman", description="AREDL hangman: guess the Extreme Demon (new level every 12 hours)", guild_only=True
 )
-NOT_LOADED = "Today's puzzle isn't loaded yet. Run `/hangman start` first."
+NOT_LOADED = "This round's puzzle isn't loaded yet. Run `/hangman start` first."
 
 
-@hangman_group.command(name="start", description="Show today's AREDL hangman puzzle")
+@hangman_group.command(name="start", description="Show the current AREDL hangman puzzle")
 async def hangman_start_cmd(interaction: discord.Interaction) -> None:
     await interaction.response.defer()  # the level list is ~1 MB, which can take over 3 s
     if not await hangman_ready():
@@ -763,7 +786,7 @@ async def hangman_start_cmd(interaction: discord.Interaction) -> None:
     g = hangman.game_for(storage.data["hangman"], interaction.guild_id)  # type: ignore[arg-type]
     note = None
     if g.finished:
-        note = ("Today's puzzle is finished. The next one starts "
+        note = ("This puzzle is finished. The next one starts "
                 f"{discord.utils.format_dt(hangman.next_reset(), 'R')}.")
     msg = await interaction.followup.send(embed=hangman_embed(g, note), wait=True)
     await remember_hangman(g, msg)
@@ -773,7 +796,7 @@ async def hangman_start_cmd(interaction: discord.Interaction) -> None:
 @app_commands.describe(guess="A single letter/digit, or the full level name")
 async def hangman_guess_cmd(interaction: discord.Interaction, guess: str) -> None:
     data = storage.data["hangman"]
-    if not hangman.current(data, hangman.utc_today()):
+    if not hangman.current(data, hangman.current_round()):
         await interaction.response.send_message(NOT_LOADED, ephemeral=True)
         return
     g = hangman.game_for(data, interaction.guild_id)  # type: ignore[arg-type]
@@ -786,12 +809,14 @@ async def hangman_guess_cmd(interaction: discord.Interaction, guess: str) -> Non
         return
     await interaction.response.send_message(embed=hangman_embed(g, text))
     await remember_hangman(g, await interaction.original_response())
+    if r.outcome == hangman.WIN and (video := await hangman_video_text(g)):
+        await interaction.followup.send(video)
 
 
-@hangman_group.command(name="giveup", description="Give up today's puzzle and see the answer (only you see it)")
+@hangman_group.command(name="giveup", description="Give up this puzzle and see the answer (only you see it)")
 async def hangman_giveup_cmd(interaction: discord.Interaction) -> None:
     data = storage.data["hangman"]
-    if not hangman.current(data, hangman.utc_today()):
+    if not hangman.current(data, hangman.current_round()):
         await interaction.response.send_message(NOT_LOADED, ephemeral=True)
         return
     g = hangman.game_for(data, interaction.guild_id)  # type: ignore[arg-type]
@@ -800,15 +825,238 @@ async def hangman_giveup_cmd(interaction: discord.Interaction) -> None:
         gave_up = g.give_up(interaction.user.id)
         storage.save()
     if not gave_up:
-        await interaction.response.send_message(f"Today's puzzle is finished. {later}", ephemeral=True)
+        await interaction.response.send_message(f"This puzzle is finished. {later}", ephemeral=True)
         return
     await interaction.response.send_message(
-        f"The level was **{discord.utils.escape_markdown(g.name)}** (#{g.position}). You're out for today. {later}",
+        f"The level was **{discord.utils.escape_markdown(g.name)}** (#{g.position}). You're out for this round. {later}",
         ephemeral=True,
     )
 
 
 client.tree.add_command(hangman_group)
+
+
+# --------------------------------------------------------------------------- #
+# AREDL RNG: a random level spawns every hour; the first to type "collect" keeps it
+# --------------------------------------------------------------------------- #
+def rarity_of(spawn: dict) -> aredl_rng.Rarity:
+    return aredl_rng.BY_KEY.get(spawn.get("rarity", ""), aredl_rng.RARITIES[-1])
+
+
+def next_hour() -> dt.datetime:
+    now = dt.datetime.now(dt.timezone.utc)
+    return now.replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
+
+
+def rng_embed(spawn: dict, escaped: bool = False) -> discord.Embed:
+    rarity = rarity_of(spawn)
+    name = discord.utils.escape_markdown(spawn["name"])
+    claimed = spawn.get("claimed_by")
+    if claimed:
+        title = f"{rarity.emoji} {spawn['name']} was collected!"
+        status = f"Collected by <@{claimed}>."
+    elif escaped:
+        title = f"💨 {spawn['name']} got away…"
+        status = "Nobody collected it in time."
+    else:
+        title = f"{rarity.emoji} A wild {rarity.name} level appeared!"
+        status = (f"Type **`{aredl_rng.COLLECT_WORD}`** to add it to your inventory! "
+                  f"Next spawn {discord.utils.format_dt(next_hour(), 'R')}.")
+    embed = discord.Embed(
+        title=title[:256],
+        description=f"## {name}\n**#{spawn['position']}** on the AREDL\n\n{status}",
+        color=discord.Color.light_grey() if escaped else rarity.color,
+    )
+    embed.add_field(name="Rarity", value=f"{rarity.emoji} **{rarity.name}**\n"
+                    f"{aredl_rng.one_in(spawn.get('chance') or 0)} spawns", inline=True)
+    if spawn.get("level_id"):
+        embed.add_field(name="Level ID", value=f"`{spawn['level_id']}`" + (" • 2P" if spawn.get("two_player") else ""),
+                        inline=True)
+    if isinstance(spawn.get("edel_enjoyment"), (int, float)):
+        embed.add_field(name="Enjoyment (EDEL)", value=f"{spawn['edel_enjoyment']:.2f}", inline=True)
+    if isinstance(spawn.get("gddl_tier"), (int, float)):
+        embed.add_field(name="GDDL tier", value=f"Tier {round(spawn['gddl_tier'])}", inline=True)
+    if spawn.get("nlw_tier"):
+        embed.add_field(name="NLW tier", value=str(spawn["nlw_tier"])[:1024], inline=True)
+    if spawn.get("tags"):
+        embed.add_field(name="Tags", value=", ".join(spawn["tags"])[:1024], inline=False)
+    if spawn.get("video"):
+        embed.add_field(name="Verification", value=f"[Watch on video]({spawn['video']})", inline=False)
+    if spawn.get("thumbnail"):
+        embed.set_image(url=spawn["thumbnail"])
+    embed.set_footer(text="AREDL RNG • levels via aredl.net • higher-ranked levels are rarer")
+    return embed
+
+
+async def edit_spawn_message(spawn: dict, escaped: bool = False) -> None:
+    channel = client.get_channel(spawn.get("channel_id") or 0)
+    if channel is None or not spawn.get("message_id"):
+        return
+    try:
+        await channel.get_partial_message(spawn["message_id"]).edit(  # type: ignore[union-attr]
+            content=None, embed=rng_embed(spawn, escaped=escaped))
+    except (discord.HTTPException, AttributeError) as exc:
+        log.warning("Couldn't update AREDL RNG spawn message %s: %s", spawn.get("message_id"), exc)
+
+
+async def rng_spawn(guild_id: int, channel: discord.abc.Messageable) -> bool:
+    """Post a new random level in ``channel``. The previous unclaimed spawn gets away."""
+    spawn = aredl_rng.pick(await hangman.fetch_levels())
+    if spawn is None:
+        log.warning("No AREDL levels available for an RNG spawn")
+        return False
+    spawn["video"] = await hangman.fetch_video(spawn["id"])
+    spawn["thumbnail"] = aredl_rng.youtube_thumbnail(spawn["video"])
+    spawn["spawned_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    rarity = rarity_of(spawn)
+    shout = None
+    if rarity.key in ("mythical", "legendary"):
+        shout = f"{rarity.emoji}{rarity.emoji}{rarity.emoji} **{rarity.name.upper()} SPAWN!** {rarity.emoji}{rarity.emoji}{rarity.emoji}"
+    msg = await channel.send(shout, embed=rng_embed(spawn))
+    spawn["channel_id"], spawn["message_id"] = msg.channel.id, msg.id
+    async with storage.lock:
+        old = storage.data["rng"]["spawns"].get(str(guild_id))
+        storage.data["rng"]["spawns"][str(guild_id)] = spawn
+        storage.save()
+    if old and not old.get("claimed_by"):
+        await edit_spawn_message(old, escaped=True)
+    return True
+
+
+async def handle_collect(message: discord.Message) -> bool:
+    """``collect`` in the channel of this server's current spawn. Returns True when handled."""
+    if not aredl_rng.is_collect(message.content):
+        return False
+    gid = str(message.guild.id)  # type: ignore[union-attr]
+    spawn = storage.data["rng"]["spawns"].get(gid)
+    if not spawn or spawn.get("channel_id") != message.channel.id:
+        return False
+    if not allow_guess(message):
+        return True
+    now = dt.datetime.now(dt.timezone.utc)
+    async with storage.lock:
+        spawn = storage.data["rng"]["spawns"].get(gid)
+        won = aredl_rng.is_open(spawn, now) and spawn.get("channel_id") == message.channel.id  # type: ignore[union-attr]
+        if won:
+            spawn["claimed_by"] = message.author.id  # type: ignore[index]
+            count = aredl_rng.add_to_inventory(storage.inventory(message.author.id), spawn, now.isoformat())  # type: ignore[arg-type]
+            storage.save()
+    if not won:
+        await safe_react(message, "💨")  # already collected (or got away)
+        return True
+    rarity = rarity_of(spawn)  # type: ignore[arg-type]
+    owned = "It's new in your inventory!" if count == 1 else f"You now have **{count}** of these."
+    text = (f"{rarity.emoji} {message.author.mention} collected **{discord.utils.escape_markdown(spawn['name'])}** "  # type: ignore[index]
+            f"(#{spawn['position']}), a **{rarity.name}** level! {owned}")  # type: ignore[index]
+    try:
+        await message.reply(text, mention_author=False)
+    except discord.HTTPException as exc:
+        log.warning("Couldn't reply to a collect in #%s: %s", message.channel, exc)
+    await edit_spawn_message(spawn)  # type: ignore[arg-type]
+    return True
+
+
+@tasks.loop(time=[dt.time(hour=h, minute=0, second=5, tzinfo=dt.timezone.utc) for h in range(24)])
+async def rng_hourly() -> None:
+    for gid, channel_id in list(storage.data["rng"]["channels"].items()):
+        channel = await resolve_channel(channel_id)
+        if channel is None:
+            continue
+        try:
+            await rng_spawn(int(gid), channel)
+        except discord.HTTPException:
+            log.exception("Failed to post an AREDL RNG spawn to %s", channel_id)
+
+
+@rng_hourly.before_loop
+async def _wait_ready_rng() -> None:
+    await client.wait_until_ready()
+
+
+@client.tree.command(name="set-aredl-rng", description="Spawn a random AREDL level here every hour (or in the channel you pick)")
+@app_commands.describe(channel="Channel for the spawns (default: this channel)")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+async def set_aredl_rng_cmd(interaction: discord.Interaction, channel: discord.TextChannel | None = None) -> None:
+    target = channel or interaction.channel
+    if not isinstance(target, (discord.TextChannel, discord.Thread)):
+        await interaction.response.send_message("Spawns need a text channel or a thread.", ephemeral=True)
+        return
+    send = "send_messages_in_threads" if isinstance(target, discord.Thread) else "send_messages"
+    missing = missing_perms(target, interaction.guild.me, ("view_channel", send, "embed_links"))  # type: ignore[union-attr]
+    if missing:
+        await interaction.response.send_message(
+            f"I can't post in {target.mention}: missing **{', '.join(missing)}**. "
+            "Give me those permissions there and try again.", ephemeral=True)
+        return
+    async with storage.lock:
+        storage.data["rng"]["channels"][str(interaction.guild_id)] = target.id
+        storage.save()
+    await interaction.response.send_message(
+        f"🎰 A random AREDL level will spawn in {target.mention} every hour, on the hour. "
+        f"The first person to type `{aredl_rng.COLLECT_WORD}` keeps it. The first one is spawning now!",
+        ephemeral=True)
+    try:
+        await rng_spawn(interaction.guild_id, target)  # type: ignore[arg-type]
+    except discord.HTTPException:
+        log.exception("Failed to post the first AREDL RNG spawn to %s", target.id)
+
+
+@client.tree.command(name="unset-aredl-rng", description="Stop the hourly AREDL RNG spawns in this server")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+async def unset_aredl_rng_cmd(interaction: discord.Interaction) -> None:
+    async with storage.lock:
+        removed = storage.data["rng"]["channels"].pop(str(interaction.guild_id), None)
+        storage.save()
+    await interaction.response.send_message(
+        "AREDL RNG spawns are off in this server. Inventories are kept." if removed
+        else "AREDL RNG spawns weren't on in this server.", ephemeral=True)
+
+
+@client.tree.command(name="inventory", description="The AREDL levels you (or someone else) collected")
+@app_commands.describe(user="Whose inventory to show (default: yours)", page="Page number")
+async def inventory_cmd(interaction: discord.Interaction, user: discord.User | None = None,
+                        page: app_commands.Range[int, 1] = 1) -> None:
+    who = user or interaction.user
+    entries = aredl_rng.sorted_inventory(storage.data["inventories"].get(str(who.id), {}))
+    embed = discord.Embed(title=f"🎒 {who.display_name}'s AREDL inventory", color=discord.Color.blurple())
+    if not entries:
+        embed.description = ("Nothing collected yet. Watch the AREDL RNG channel and type "
+                             f"`{aredl_rng.COLLECT_WORD}` when a level spawns!")
+        await interaction.response.send_message(embed=embed)
+        return
+    counts = aredl_rng.rarity_counts(storage.data["inventories"][str(who.id)])
+    summary = "  ".join(f"{r.emoji} {counts[r.key]}" for r in aredl_rng.RARITIES)
+    pages = math.ceil(len(entries) / aredl_rng.PAGE_SIZE)
+    page = min(page, pages)
+    start = (page - 1) * aredl_rng.PAGE_SIZE
+    lines = []
+    for e in entries[start:start + aredl_rng.PAGE_SIZE]:
+        rarity = aredl_rng.BY_KEY.get(e.get("rarity", ""), aredl_rng.RARITIES[-1])
+        extra = f" ×{e['count']}" if e.get("count", 1) > 1 else ""
+        lines.append(f"{rarity.emoji} `#{e.get('position', '?'):>4}` {discord.utils.escape_markdown(e['name'])}{extra}")
+    embed.description = f"{summary}\n\n" + "\n".join(lines)
+    total = sum(e.get("count", 1) for e in entries)
+    embed.set_footer(text=f"{len(entries)} unique • {total} collected • page {page}/{pages} • "
+                          "positions are from when each level was collected")
+    await interaction.response.send_message(embed=embed)
+
+
+@client.tree.command(name="rarities", description="AREDL RNG rarities and the chance of each per spawn")
+async def rarities_cmd(interaction: discord.Interaction) -> None:
+    await interaction.response.defer()
+    levels = await hangman.fetch_levels()
+    odds = aredl_rng.tier_odds(levels) if levels else {}
+    lines, low = [], 1
+    for r in aredl_rng.RARITIES:
+        span = f"#{low}–{r.max_position}" if r.max_position else f"#{low}+"
+        chance = f" • {aredl_rng.one_in(odds[r.key])} spawns" if odds.get(r.key) else ""
+        lines.append(f"{r.emoji} **{r.name}** ({span}){chance}")
+        low = (r.max_position or 0) + 1
+    embed = discord.Embed(title="🎰 AREDL RNG rarities", description="\n".join(lines), color=discord.Color.gold())
+    embed.set_footer(text="Within a rarity, higher-ranked levels are rarer still (#1 is far rarer than #10)")
+    await interaction.followup.send(embed=embed)
 
 
 if __name__ == "__main__":

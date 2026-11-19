@@ -1,4 +1,8 @@
-"""Tiny JSON-file storage for daily content, solves and scores."""
+"""Tiny JSON-file storage for daily content, solves and scores.
+
+Scores (the leaderboard) and AREDL RNG inventories are kept in their own files so
+they can be backed up or restored independently of the day-to-day bot state.
+"""
 
 from __future__ import annotations
 
@@ -12,9 +16,23 @@ from typing import Any
 DAILY_FEATURES = ("qotd", "crossword", "wordsearch", "aredl")
 
 
+def _write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 class Storage:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, leaderboard_path: str | Path | None = None,
+                 inventory_path: str | Path | None = None):
         self.path = Path(path)
+        self.leaderboard_path = (
+            Path(leaderboard_path) if leaderboard_path else self.path.with_name("leaderboard.json")
+        )
+        self.inventory_path = (
+            Path(inventory_path) if inventory_path else self.path.with_name("inventory.json")
+        )
         self.lock = asyncio.Lock()
         self.data: dict[str, Any] = {}
         if self.path.exists():
@@ -27,16 +45,39 @@ class Storage:
         self.data.setdefault("puzzle_posts", {})   # day -> {message_id: "crossword" | "wordsearch"}
         self.data.setdefault("puzzle_channels", {})  # day -> [channel ids where today's puzzles were posted]
         self.data.setdefault("solves", {})         # day -> {user_id: {"crossword": [...], "wordsearch": [...]}}
-        self.data.setdefault("scores", {})         # user_id -> {"words": int, "crosswords": int, "wordsearches": int}
         self.data.setdefault("hangman", {})  # daily AREDL hangman: {"day", "level", "previous", "guilds"}
-        if self._migrate_legacy_channels():
-            self.save()
+        rng = self.data.setdefault("rng", {})  # AREDL RNG spawns
+        rng.setdefault("channels", {})  # guild_id -> channel id for hourly spawns
+        rng.setdefault("spawns", {})    # guild_id -> current spawn (card + channel/message ids, claimed_by)
+
+        # AREDL RNG inventories: user_id -> {level uuid: {"count", "name", "position", "rarity", ...}}
+        self.data["inventories"] = (
+            json.loads(self.inventory_path.read_text(encoding="utf-8"))
+            if self.inventory_path.exists() else {}
+        )
+
+        # Leaderboard: user_id -> {"words": int, "crosswords": int, "wordsearches": int}
+        legacy_scores = self.data.pop("scores", None)
+        if self.leaderboard_path.exists():
+            scores = json.loads(self.leaderboard_path.read_text(encoding="utf-8"))
+        else:
+            # One-time migration: move scores out of the old combined state file.
+            scores = legacy_scores or {}
+        self.data["scores"] = scores
+
+        migrated_channels = self._migrate_legacy_channels()
+        if legacy_scores is not None or migrated_channels:
+            self.save()  # writes leaderboard.json and strips scores from state.json
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        state = {k: v for k, v in self.data.items() if k not in ("scores", "inventories")}
+        # Write the leaderboard first so a crash never loses migrated scores.
+        _write_json(self.leaderboard_path, self.data["scores"])
+        _write_json(self.inventory_path, self.data["inventories"])
+        _write_json(self.path, state)
+
+    def inventory(self, user_id: int) -> dict[str, dict]:
+        return self.data["inventories"].setdefault(str(user_id), {})
 
     def score(self, user_id: int) -> dict[str, int]:
         s = self.data["scores"].setdefault(str(user_id), {})

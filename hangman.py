@@ -1,10 +1,10 @@
-"""Daily AREDL hangman (no Discord code, so it's easy to test).
+"""AREDL hangman (no Discord code, so it's easy to test).
 
-Every UTC day picks one level from the AREDL list (https://api.aredl.net/v2/docs).
+Every 12-hour round picks one level from the AREDL list (https://api.aredl.net/v2/docs).
 Players guess its name letter by letter, or all at once, using the level's
-description as a hint. Each player has their own lives.
+description as a hint. Each player has their own lives per round.
 
-The day boundary is 00:00 UTC from the system clock (``datetime.now(timezone.utc)``).
+Rounds start at 00:00 and 12:00 UTC from the system clock (``datetime.now(timezone.utc)``).
 Servers keep their clock NTP-synced, so an external time API would only add a
 failure mode. The bot's ``TIMEZONE`` setting is only for the other daily posts.
 """
@@ -17,19 +17,21 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
 API_URL = "https://api.aredl.net/v2/api/aredl/levels"
-LIVES = 6                    # lives per player per day
+LIVES = 3                    # lives per player per round
+ROUND_HOURS = 12             # a new level every 12 hours: 00:00 and 12:00 UTC
 CACHE_TTL = 6 * 60 * 60      # seconds to keep the downloaded level list
 NO_DESCRIPTION = "No description available."
 REDACTED = "███"
 MAX_MESSAGES = 50            # board message ids remembered per guild (for replies)
 
-# A puzzle stays PLAYING until someone solves it or the UTC day rolls over; running out
+# A puzzle stays PLAYING until someone solves it or the round rolls over; running out
 # of lives only locks out that player. LOST is kept so older saved state still loads.
 PLAYING, WON, LOST = "playing", "won", "lost"
 
@@ -54,14 +56,35 @@ def utc_now(now: dt.datetime | None = None) -> dt.datetime:
     return now.astimezone(dt.timezone.utc) if now is not None else dt.datetime.now(dt.timezone.utc)
 
 
-def utc_today(now: dt.datetime | None = None) -> str:
-    return utc_now(now).date().isoformat()
+def round_start(now: dt.datetime | None = None) -> dt.datetime:
+    """When the current round began (the latest 00:00 or 12:00 UTC)."""
+    t = utc_now(now)
+    return t.replace(hour=t.hour - t.hour % ROUND_HOURS, minute=0, second=0, microsecond=0)
+
+
+def round_key(start: dt.datetime) -> str:
+    """``2026-10-25`` for the 00:00 round, ``2026-10-25 12:00`` for the 12:00 one.
+    The first round keeps the plain date so state saved by the old daily version still matches."""
+    day = start.date().isoformat()
+    return day if start.hour == 0 else f"{day} {start:%H:%M}"
+
+
+def current_round(now: dt.datetime | None = None) -> str:
+    return round_key(round_start(now))
+
+
+def previous_round(now: dt.datetime | None = None) -> str:
+    return round_key(round_start(now) - dt.timedelta(hours=ROUND_HOURS))
+
+
+def round_label(key: str) -> str:
+    """``2026-10-25`` -> ``2026-10-25 00:00``, for display."""
+    return key if " " in key else f"{key} 00:00"
 
 
 def next_reset(now: dt.datetime | None = None) -> dt.datetime:
-    """The next 00:00 UTC, when a new level starts."""
-    tomorrow = utc_now(now).date() + dt.timedelta(days=1)
-    return dt.datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=dt.timezone.utc)
+    """The next 00:00 or 12:00 UTC, when a new level starts."""
+    return round_start(now) + dt.timedelta(hours=ROUND_HOURS)
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +126,33 @@ async def fetch_levels() -> list[dict]:
         except Exception as exc:
             log.warning("AREDL request failed (attempt %d/2): %s", attempt + 1, exc)
     return _cache
+
+
+def pick_video(level: object) -> str | None:
+    """The first visible verification video in a ``GET /levels/{id}`` response."""
+    verifications = level.get("verifications") if isinstance(level, dict) else None
+    for record in verifications if isinstance(verifications, list) else []:
+        if not isinstance(record, dict) or record.get("hide_video"):
+            continue
+        url = record.get("video_url")
+        if isinstance(url, str) and url.startswith(("https://", "http://")):
+            return url
+    return None
+
+
+async def fetch_video(level_id: str) -> str | None:
+    """The level's verification video URL. The level list has no videos, so this asks the
+    level details endpoint. Returns None (after logging) when there's none or the API fails."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{API_URL}/{quote(level_id, safe='')}") as resp:
+                if resp.status != 200:
+                    raise ValueError(f"HTTP {resp.status}")
+                return pick_video(await resp.json(content_type=None))
+    except Exception as exc:
+        log.warning("AREDL video lookup failed for %s: %s", level_id, exc)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -223,6 +273,9 @@ class Game:
         for key in ("guessed", "wrong", "wrong_names", "messages", "channels"):
             state.setdefault(key, [])
         state.setdefault("lives", {})
+        for uid, n in state["lives"].items():
+            if n > LIVES:  # saved under an older, higher cap
+                state["lives"][uid] = LIVES
         state.setdefault("status", PLAYING)
         state.setdefault("winner", None)
 
@@ -328,11 +381,11 @@ def game_for(data: dict, guild_id: int) -> Game:
 if __name__ == "__main__":
     import asyncio
 
-    day = utc_today()
+    day = current_round()
     levels = asyncio.run(fetch_levels())
     if not levels:
         raise SystemExit("Couldn't reach the AREDL API.")
     preview = Game(pick_level(day, levels), {})
-    print(f"{day} (UTC)")
+    print(f"{round_label(day)} (UTC)")
     print(preview.board())
     print(preview.hint() or NO_DESCRIPTION)
