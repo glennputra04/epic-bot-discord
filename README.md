@@ -1,11 +1,12 @@
 # Epic Bot Discord
 
-A Python Discord bot that posts four things every day:
+A Python Discord bot with daily puzzles and two AREDL games:
 
 - **💬 Question of the Day:** an open-ended question from the [boneitis.org API](https://boneitis.org/docs). There's no answer to check; it's just a conversation starter.
 - **🧩 Daily Crossword:** a crossword built from `words.json`, with a **Play on Puzzel** link from the [Puzzel.org Puzzle API](https://puzzel.org/en/developers/puzzle-api).
 - **🔎 Daily Word Search:** an 8-word search built from the same list, also with a Puzzel link. Players get each word's clue but not the word itself, so they work out the word and then find it in the grid.
 - **🎯 Daily AREDL Hangman:** guess the name of a level from the [AREDL API](https://api.aredl.net/v2/docs), with its description as a hint and 3 lives per player. The level's verification video is posted when it's solved.
+- **🎰 AREDL RNG:** a random AREDL level spawns every hour; the first person to type `collect` adds it to their inventory. Higher-ranked levels are rarer.
 
 Every date always gives the same puzzles, so the whole server solves the same ones.
 
@@ -36,6 +37,15 @@ _ _ _ _ _ _ _  /  _ _
 - The puzzle stays open until someone completes the name. A solved puzzle stays solved until the next round, and the next round's post in the AREDL daily channel reveals the previous level either way.
 - `/hangman giveup` is personal: it shows you the answer (only you see it) and puts you out for the round. It doesn't end the puzzle for anyone else.
 
+## AREDL RNG
+
+Run `/set-aredl-rng` in a channel (Manage Server) and a random level from the AREDL main list spawns there every hour, on the hour. The first person to type **`collect`** in that channel keeps it. An uncollected level gets away when the next one spawns.
+
+- Each spawn shows the level's position, rarity and odds, level ID, tags, EDEL enjoyment, GDDL/NLW tier and its verification video (with a thumbnail for YouTube videos), when AREDL has them.
+- The higher a level is ranked, the rarer it is. A level's spawn weight is `p × 150 / (150 + p)` for position `p`, so #1 is about 60× rarer than #100 and about 150× rarer than #1000. Legacy levels don't spawn.
+- Rarities: 🌌 Mythical (#1–10), 🌟 Legendary (#11–50), 💜 Epic (#51–150), 💙 Rare (#151–400), 💚 Uncommon (#401–800), ⚪ Common (#801+). Mythical and Legendary spawns get an announcement.
+- `/inventory` shows your collection (best-ranked first) with duplicates counted; `/rarities` shows the current odds of each rarity.
+
 ## Commands
 
 | Command | Description |
@@ -49,6 +59,10 @@ _ _ _ _ _ _ _  /  _ _
 | `/hangman start` | Show the current AREDL hangman board |
 | `/hangman guess` | Guess a letter/digit or the full level name |
 | `/hangman giveup` | See the answer (only you see it); you're out for this round |
+| `/inventory [user] [page]` | AREDL levels you (or someone else) collected |
+| `/rarities` | AREDL RNG rarities and the chance of each per spawn |
+| `/set-aredl-rng [channel]` | *(Manage Server)* Spawn a random AREDL level in a channel every hour (default: this one) |
+| `/unset-aredl-rng` | *(Manage Server)* Stop the hourly spawns in this server (inventories are kept) |
 | `/set-daily-qotd [channel]` | *(Manage Server)* Post the Question of the Day in a channel (default: this one) |
 | `/set-daily-crossword [channel]` | *(Manage Server)* Post the daily crossword in a channel (default: this one) |
 | `/set-daily-wordsearch [channel]` | *(Manage Server)* Post the daily word search in a channel (default: this one) |
@@ -133,7 +147,8 @@ wordsearch.py  Word search generator and text renderer
 hangman.py     Daily AREDL hangman: API client, masking, guesses and lives
 ratelimit.py   Per-user/per-channel rate limits (token bucket)
 words.json     Word/clue bank
-storage.py     JSON file storage (data/state.json + data/leaderboard.json)
+aredl_rng.py   AREDL RNG: rarities, weighted spawns, inventories
+storage.py     JSON file storage (data/state.json + data/leaderboard.json + data/inventory.json)
 ```
 
 The leaderboard lives in its own file, `data/leaderboard.json` (override with
@@ -141,3 +156,5 @@ The leaderboard lives in its own file, `data/leaderboard.json` (override with
 that file in place while the bot is stopped restores everyone's scores. On
 first start after upgrading, existing scores are moved out of `state.json`
 automatically.
+
+AREDL RNG inventories are kept the same way in `data/inventory.json` (override with `INVENTORY_FILE`). Back it up or restore it like the leaderboard, with the bot stopped.
