@@ -17,13 +17,14 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
 API_URL = "https://api.aredl.net/v2/api/aredl/levels"
-LIVES = 6                    # lives per player per day
+LIVES = 3                    # lives per player per day
 CACHE_TTL = 6 * 60 * 60      # seconds to keep the downloaded level list
 NO_DESCRIPTION = "No description available."
 REDACTED = "███"
@@ -103,6 +104,33 @@ async def fetch_levels() -> list[dict]:
         except Exception as exc:
             log.warning("AREDL request failed (attempt %d/2): %s", attempt + 1, exc)
     return _cache
+
+
+def pick_video(level: object) -> str | None:
+    """The first visible verification video in a ``GET /levels/{id}`` response."""
+    verifications = level.get("verifications") if isinstance(level, dict) else None
+    for record in verifications if isinstance(verifications, list) else []:
+        if not isinstance(record, dict) or record.get("hide_video"):
+            continue
+        url = record.get("video_url")
+        if isinstance(url, str) and url.startswith(("https://", "http://")):
+            return url
+    return None
+
+
+async def fetch_video(level_id: str) -> str | None:
+    """The level's verification video URL. The level list has no videos, so this asks the
+    level details endpoint. Returns None (after logging) when there's none or the API fails."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{API_URL}/{quote(level_id, safe='')}") as resp:
+                if resp.status != 200:
+                    raise ValueError(f"HTTP {resp.status}")
+                return pick_video(await resp.json(content_type=None))
+    except Exception as exc:
+        log.warning("AREDL video lookup failed for %s: %s", level_id, exc)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -223,6 +251,9 @@ class Game:
         for key in ("guessed", "wrong", "wrong_names", "messages", "channels"):
             state.setdefault(key, [])
         state.setdefault("lives", {})
+        for uid, n in state["lives"].items():
+            if n > LIVES:  # saved under an older, higher cap
+                state["lives"][uid] = LIVES
         state.setdefault("status", PLAYING)
         state.setdefault("winner", None)
 

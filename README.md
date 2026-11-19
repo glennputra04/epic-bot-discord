@@ -5,7 +5,7 @@ A Python Discord bot that posts four things every day:
 - **💬 Question of the Day:** an open-ended question from the [boneitis.org API](https://boneitis.org/docs). There's no answer to check; it's just a conversation starter.
 - **🧩 Daily Crossword:** a crossword built from `words.json`, with a **Play on Puzzel** link from the [Puzzel.org Puzzle API](https://puzzel.org/en/developers/puzzle-api).
 - **🔎 Daily Word Search:** an 8-word search built from the same list, also with a Puzzel link. Players get each word's clue but not the word itself, so they work out the word and then find it in the grid.
-- **🎯 Daily AREDL Hangman:** guess the name of a level from the [AREDL API](https://api.aredl.net/v2/docs), with its description as a hint and 6 lives per player.
+- **🎯 Daily AREDL Hangman:** guess the name of a level from the [AREDL API](https://api.aredl.net/v2/docs), with its description as a hint and 3 lives per player. The level's verification video is posted when it's solved.
 
 Every date always gives the same puzzles, so the whole server solves the same ones.
 
@@ -30,8 +30,9 @@ _ _ _ _ _ _ _  /  _ _
 ```
 
 - Type a **single letter or digit** in a channel where today's board was posted, **reply** to the board with the full level name, or use `/hangman guess`. Case, spaces and punctuation don't matter. In chat, repeated guesses and guesses from players who are out are ignored quietly.
-- Every player has **6 lives** a day. A wrong letter or wrong name costs only you a life; at 0 you're out until tomorrow, but everyone else can keep playing. Repeating a guess costs nothing.
+- Every player has **3 lives** a day. A wrong letter or wrong name costs only you a life; at 0 you're out until tomorrow, but everyone else can keep playing. Repeating a guess costs nothing.
 - The hint is the level's description with the level name blanked out. Levels without one show "No description available." and their tags. While playing, the position is shown as a band (`Top 100`, `#101–250`, `#251–500`, `#501–1000`, `#1001+` or `Legacy`); the exact position appears once the puzzle is solved.
+- When someone completes the name, the bot also posts the level's verification video (from the AREDL level details), if AREDL has one.
 - The puzzle stays open until someone completes the name. A solved puzzle stays solved until the next UTC day, and the next day's post in the AREDL daily channel reveals yesterday's level either way.
 - `/hangman giveup` is personal: it shows you the answer (only you see it) and puts you out for the day. It doesn't end the puzzle for anyone else.
 

@@ -395,6 +395,21 @@ async def send_hangman(channel: discord.abc.Messageable, guild_id: int, note: st
     return msg
 
 
+async def hangman_video_text(g: hangman.Game) -> str | None:
+    """The 'here's the level' follow-up for a solved board, or None if AREDL has no video.
+    A found URL is saved with today's level so other servers' wins don't ask the API again."""
+    url = g.level.get("video")
+    if not url:
+        url = await hangman.fetch_video(g.level["id"])
+        if not url:
+            return None
+        async with storage.lock:
+            g.level["video"] = url
+            storage.save()
+    # Sent as plain text so Discord shows its video player (embeds can't play videos).
+    return f"🎬 **{discord.utils.escape_markdown(g.name)}** verification: {url}"
+
+
 async def handle_hangman(message: discord.Message) -> bool:
     """Treat a single letter in a channel with today's board, or a reply to the board,
     as a hangman guess. Returns True when the message was a guess."""
@@ -422,6 +437,8 @@ async def handle_hangman(message: discord.Message) -> bool:
     try:
         reply = await message.reply(embed=hangman_embed(g, text), mention_author=False)
         await remember_hangman(g, reply)
+        if r.outcome == hangman.WIN and (video := await hangman_video_text(g)):
+            await message.channel.send(video)
     except discord.HTTPException as exc:
         log.warning("Couldn't reply to a hangman guess in #%s: %s", message.channel, exc)
     return True
@@ -787,6 +804,8 @@ async def hangman_guess_cmd(interaction: discord.Interaction, guess: str) -> Non
         return
     await interaction.response.send_message(embed=hangman_embed(g, text))
     await remember_hangman(g, await interaction.original_response())
+    if r.outcome == hangman.WIN and (video := await hangman_video_text(g)):
+        await interaction.followup.send(video)
 
 
 @hangman_group.command(name="giveup", description="Give up today's puzzle and see the answer (only you see it)")
